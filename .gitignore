@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+framework-cache/*
+!framework-cache/.keep
+art-cache/*
+!art-cache/.keep
+settings.json
