@@ -29,6 +29,13 @@ missing.
 
 ROMs whose mapper is outside the runtime's coverage list are flagged
 **needs review** and skipped (Settings has a "try anyway" override).
+The same flag applies to NES 2.0 headers naming a cartridge variant the
+framework does not implement (an unusual submapper). One variant *is*
+handled: mapper 4 submapper 3 is Acclaim's MC-ACC, an MMC3 clone chip
+used by Alien 3 and a dozen other LJN/Acclaim titles — the app patches
+its framework copy to accept it as a standard MMC3, so those games
+convert normally. (Mapper 4 submapper 1, the MMC6 in StarTropics, stays
+flagged — it is a genuinely different chip.)
 
 ## The packages
 
