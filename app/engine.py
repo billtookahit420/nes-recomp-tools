@@ -63,6 +63,29 @@ def log_line(log, msg):
 # Probe
 # --------------------------------------------------------------------------
 
+# NES 2.0 submapper variants the framework's cartridge check accepts for its
+# supported mappers (mirrors common/nes_cart.h nes_cart_variant_supported,
+# including this app's carried patch: mapper 4 submapper 3, Acclaim's MC-ACC
+# clone, treated as a standard MMC3). Anything else nonzero is flagged
+# needs-review up front instead of failing deep inside the build.
+_VARIANT_MAX = {2: 2, 3: 2, 7: 2, 34: 2, 71: 1, 206: 1, 232: 1, 21: 2,
+                85: 2, 23: 3, 25: 3, 19: 5, 32: 1}
+_VARIANT_SET = {4: {0, 3}, 5: {0}, 16: {0, 4, 5}, 78: {0, 1, 3}, 118: {0},
+                96: {0}, 119: {0}, 77: {0}, 153: {0}, 157: {0}, 159: {0}}
+
+
+def _variant_supported(mapper, submapper):
+    if submapper == 0:
+        return True
+    if mapper in (1, 155):
+        return True  # gated by size rules inside the framework instead
+    if mapper in _VARIANT_SET:
+        return submapper in _VARIANT_SET[mapper]
+    if mapper in _VARIANT_MAX:
+        return submapper <= _VARIANT_MAX[mapper]
+    return False
+
+
 def probe_rom(rom_path):
     """Parse an iNES / NES 2.0 header. Instant; no framework needed."""
     p = Path(rom_path)
@@ -88,6 +111,7 @@ def probe_rom(rom_path):
             or "(spain)" in low or "(italy)" in low or "(australia)" in low or "(sweden)" in low:
         region = "PAL"
     supported = mapper in supported_mappers()
+    variant_ok = _variant_supported(mapper, submapper)
     return {
         "rom": str(p),
         "title": stem,
@@ -102,7 +126,8 @@ def probe_rom(rom_path):
         "nes2": nes2,
         "region": region,
         "mapper_supported": supported,
-        "needs_review": not supported,
+        "variant_supported": variant_ok,
+        "needs_review": (not supported) or not variant_ok,
         "players": 2,
         "crc32": _rom_crc32(p),
     }
@@ -243,8 +268,15 @@ def ensure_frameworks(log):
         log_line(log, "fetching recomp-ui…")
         _git_clone(RECOMP_UI_GIT, RECOMP_UI_DIR, recursive=False, log=log)
     _pin_recomp_net(log)
+    _patch_mcacc(log)
     host = HOST_BUILD_DIR / "NESRecomp"
-    if not host.exists():
+    hdr = NESRECOMP_DIR / "common" / "nes_cart.h"
+    stale = (host.exists() and hdr.exists()
+             and hdr.stat().st_mtime > host.stat().st_mtime)
+    if stale:
+        log_line(log, "host recompiler predates the framework cartridge "
+                      "header; rebuilding it…")
+    if not host.exists() or stale:
         log_line(log, "building the host recompiler (one-time)…")
         _run(["cmake", "-S", str(NESRECOMP_DIR / "recompiler"), "-B", str(HOST_BUILD_DIR),
               "-DCMAKE_BUILD_TYPE=Release"], log)
@@ -257,6 +289,36 @@ def ensure_frameworks(log):
 # RNetLobbyModPkg has no 'nf' member). Bump just that submodule to the
 # paired commit or every netplay build fails in recomp_netplay_host.c.
 RECOMP_NET_PIN = "7a4d330ecf995b881d167234da3c0b01675fd512"
+
+
+_MCACC_MARKER = "case 4: return c->submapper == 0 || c->submapper == 3;"
+
+
+def _patch_mcacc(log):
+    """Carried framework patch (idempotent): the framework's cartridge check
+    rejects NES 2.0 mapper 4 submapper 3 - Acclaim's MC-ACC, an MMC3 clone
+    ASIC used by 13 games in a typical collection (Alien 3 and other LJN /
+    Acclaim titles). Accept it as a standard MMC3 in both the recompiler and
+    the runtime (they share common/nes_cart.h). Best-effort with a loud
+    warning, like the recomp-net pin: a failed patch never blocks a build,
+    but MC-ACC games will then fail at codegen until it is applied."""
+    hdr = FRAMEWORK_CACHE / "nesrecomp" / "common" / "nes_cart.h"
+    try:
+        text = hdr.read_text(errors="replace")
+    except OSError:
+        log("WARNING: nes_cart.h not found; MC-ACC patch skipped")
+        return
+    if _MCACC_MARKER in text:
+        return
+    old_line = "    default: return c->submapper == 0;"
+    if text.count(old_line) != 1:
+        log("WARNING: nes_cart.h layout changed upstream; MC-ACC patch skipped")
+        return
+    new_line = ("    case 4: return c->submapper == 0 || c->submapper == 3;"
+                " /* MC-ACC (Acclaim MMC3 clone) as MMC3: recomp-tools patch */\n"
+                + old_line)
+    hdr.write_text(text.replace(old_line, new_line))
+    log("[patch] framework: mapper 4 accepts submapper 3 (MC-ACC as MMC3)")
 
 
 def _pin_recomp_net(log):
