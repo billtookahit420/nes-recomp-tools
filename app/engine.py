@@ -242,6 +242,7 @@ def ensure_frameworks(log):
     if not (RECOMP_UI_DIR / "recomp_ui.cmake").exists():
         log_line(log, "fetching recomp-ui…")
         _git_clone(RECOMP_UI_GIT, RECOMP_UI_DIR, recursive=False, log=log)
+    _pin_recomp_net(log)
     host = HOST_BUILD_DIR / "NESRecomp"
     if not host.exists():
         log_line(log, "building the host recompiler (one-time)…")
@@ -249,6 +250,37 @@ def ensure_frameworks(log):
               "-DCMAKE_BUILD_TYPE=Release"], log)
         _run(["cmake", "--build", str(HOST_BUILD_DIR), "-j", "2"], log)
     return host
+
+
+# NESRecomp pins lib/recomp-net at a commit older than the one the
+# current recomp-ui netplay backend compiles against (its
+# RNetLobbyModPkg has no 'nf' member). Bump just that submodule to the
+# paired commit or every netplay build fails in recomp_netplay_host.c.
+RECOMP_NET_PIN = "7a4d330ecf995b881d167234da3c0b01675fd512"
+
+
+def _pin_recomp_net(log):
+    rnet = NESRECOMP_DIR / "lib" / "recomp-net"
+    if not (rnet / ".git").exists():
+        return
+    try:
+        cur = subprocess.run(["git", "-C", str(rnet), "rev-parse", "HEAD"],
+                             capture_output=True, text=True).stdout.strip()
+        if cur == RECOMP_NET_PIN:
+            return
+        log_line(log, "pinning lib/recomp-net to the recomp-ui-paired commit…")
+        subprocess.run(["git", "-C", str(rnet), "fetch", "--depth", "1",
+                        "origin", RECOMP_NET_PIN],
+                       capture_output=True, text=True, timeout=600)
+        subprocess.run(["git", "-C", str(rnet), "checkout", "-q", RECOMP_NET_PIN],
+                       capture_output=True, text=True, timeout=120)
+        now = subprocess.run(["git", "-C", str(rnet), "rev-parse", "HEAD"],
+                             capture_output=True, text=True).stdout.strip()
+        if now != RECOMP_NET_PIN:
+            log_line(log, "WARNING: could not pin lib/recomp-net; "
+                          "netplay builds may fail")
+    except Exception as exc:  # never block conversions on the pin
+        log_line(log, f"WARNING: recomp-net pin failed: {exc}")
 
 
 def _git_clone(url, dest, recursive, log):
@@ -313,6 +345,10 @@ nesrecomp_add_cycle_game({camel}
     PLAYERS {players}
     REGION {region}
     RECOMPILER "${{NES_TOOLS_HOST_RECOMPILER}}"{seed_line}{extras_line}{boxart_line})
+# Rollback netplay (recomp-net): session facade, ROM identity and the
+# launcher lobby adapter. Without this call the launcher has no NETPLAY
+# button and the host's netplay paths compile out entirely.
+nesrecomp_enable_recomp_net({camel})
 {ra_block}"""
 
 RA_CMAKE_BLOCK = """
