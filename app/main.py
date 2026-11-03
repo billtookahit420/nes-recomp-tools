@@ -163,7 +163,11 @@ class MainWindow(QMainWindow):
         self.resize(1180, 760)
         self.items = []             # list of probe dicts (+ status)
         self.worker = None
-        self.cover_worker = None
+        # Live cover-fetch threads, each referenced until it finishes
+        # (dropping a still-running QThread aborts the app — the
+        # scroll/add crash fixed in the GB app 2026-11-02).
+        self._cover_workers = set()
+        self._cover_wanted = None
         self._build_ui()
         self._load_settings()
         self.refresh_toolbox()
@@ -382,7 +386,10 @@ class MainWindow(QMainWindow):
         rows = self.table.selectedIndexes()
         if not rows:
             return
-        probe = self.items[rows[0].row()]
+        row = rows[0].row()
+        if not 0 <= row < len(self.items):
+            return
+        probe = self.items[row]
         self.p_title.setText(probe["title"])
         self.p_mapper.setText(
             f"{probe['mapper']} (sub {probe['submapper']})"
@@ -395,13 +402,35 @@ class MainWindow(QMainWindow):
         self.p_region.setText(probe["region"])
         self.p_crc.setText(probe["crc32"])
         self.p_cover.setText("fetching art…")
-        self.cover_worker = CoverWorker(probe["title"])
-        self.cover_worker.done.connect(self._cover_done)
-        self.cover_worker.start()
+        # One fetch per title, never a fresh thread per selection
+        # change (see _cover_workers note in __init__).
+        key = probe["title"]
+        self._cover_wanted = key
+        if any(w.key == key for w in self._cover_workers):
+            return
+        worker = CoverWorker(key)
+        worker.key = key
+        self._cover_workers.add(worker)
+        worker.done.connect(
+            lambda t, p, k=key: self._cover_done(k, t, p))
+        worker.finished.connect(
+            lambda wk=worker: self._cover_finished(wk))
+        worker.start()
 
-    def _cover_done(self, title, path):
+    def _cover_finished(self, worker):
+        self._cover_workers.discard(worker)
+        worker.deleteLater()
+
+    def _cover_done(self, key, title, path):
+        if key != self._cover_wanted:
+            return          # selection moved on; stale result
         rows = self.table.selectedIndexes()
-        if not rows or self.items[rows[0].row()]["title"] != title:
+        if not rows:
+            return
+        row = rows[0].row()
+        if not 0 <= row < len(self.items):
+            return
+        if self.items[row]["title"] != title:
             return
         if path:
             pix = QPixmap(str(path))
